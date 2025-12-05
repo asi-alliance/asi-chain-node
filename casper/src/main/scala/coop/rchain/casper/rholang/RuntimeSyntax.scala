@@ -42,7 +42,7 @@ import coop.rchain.casper.util.rholang.{
   Tools
 }
 import coop.rchain.crypto.PublicKey
-import coop.rchain.shared.Base16
+import coop.rchain.shared.{Base16, Stopwatch}
 import coop.rchain.crypto.signatures.{Secp256k1, Signed}
 import coop.rchain.metrics.{Metrics, Span}
 import coop.rchain.models.BlockHash.BlockHash
@@ -62,7 +62,10 @@ import coop.rchain.models.{
   Var
 }
 import coop.rchain.rholang.interpreter.RhoRuntime.bootstrapRegistry
-import coop.rchain.rholang.interpreter.SystemProcesses.BlockData
+import coop.rchain.rholang.interpreter.SystemProcesses.{
+  BlockData,
+  DeployData => SystemProcessDeployData
+}
 import coop.rchain.rholang.interpreter.accounting.Cost
 import coop.rchain.rholang.interpreter.errors.BugFoundError
 import coop.rchain.rholang.interpreter.{storage, EvaluateResult, RhoRuntime}
@@ -75,7 +78,7 @@ import coop.rchain.rholang.interpreter.merging.RholangMergingLogic
 import coop.rchain.rspace.merger.MergingLogic.NumberChannelsEndVal
 
 trait RuntimeSyntax {
-  implicit final def casperSyntaxRholangRuntime[F[_]: Sync: Span: Log](
+  implicit final def casperSyntaxRholangRuntime[F[_]: Sync: Span: Log: Metrics](
       runtime: RhoRuntime[F]
   ): RuntimeOps[F] = new RuntimeOps[F](runtime)
 }
@@ -84,7 +87,7 @@ object RuntimeSyntax {
   type SysEvalResult[S <: SystemDeploy] = (Either[SystemDeployUserError, S#Result], EvaluateResult)
 }
 
-final class RuntimeOps[F[_]: Sync: Span: Log](
+final class RuntimeOps[F[_]: Sync: Span: Log: Metrics](
     private val runtime: RhoRuntime[F]
 ) {
   implicit val RuntimeMetricsSource = Metrics.Source(CasperMetricsSource, "rho-runtime")
@@ -415,7 +418,17 @@ final class RuntimeOps[F[_]: Sync: Span: Log](
     for {
       // Evaluate Rholang term with trace diagnostics
       evalResult <- Span[F].traceI("evaluate-system-source") {
-                     evaluateSystemSource(systemDeploy)
+                     Stopwatch.durationRaw(evaluateSystemSource(systemDeploy)).flatMap {
+                       case (result, elapsed) =>
+                         Metrics[F]
+                           .record(
+                             "block.replay.sysdeploy.eval.evaluate-source.time",
+                             elapsed.toMillis
+                           )(
+                             Metrics.Source(CasperMetricsSource, "casper")
+                           )
+                           .as(result)
+                     }
                    }
 
       // Throw fatal error if Rholang execution failed
@@ -425,7 +438,14 @@ final class RuntimeOps[F[_]: Sync: Span: Log](
 
       // Consume System deploy result with trace diagnostics
       consumeResultDiag = Span[F].traceI("consume-system-result") {
-        consumeSystemResult(systemDeploy)
+        Stopwatch.durationRaw(consumeSystemResult(systemDeploy)).flatMap {
+          case (result, elapsed) =>
+            Metrics[F]
+              .record("block.replay.sysdeploy.eval.consume-result.time", elapsed.toMillis)(
+                Metrics.Source(CasperMetricsSource, "casper")
+              )
+              .as(result)
+        }
       }
 
       // Get Rholang evaluation result
@@ -531,7 +551,8 @@ final class RuntimeOps[F[_]: Sync: Span: Log](
 
   def evaluate(deploy: Signed[DeployData]): F[EvaluateResult] = {
     import coop.rchain.models.rholang.implicits._
-    runtime.evaluate(
+    val deployData = SystemProcessDeployData.fromDeploy(deploy)
+    runtime.setDeployData(deployData) >> runtime.evaluate(
       deploy.data.term,
       Cost(deploy.data.phloLimit),
       NormalizerEnv(deploy).toEnv

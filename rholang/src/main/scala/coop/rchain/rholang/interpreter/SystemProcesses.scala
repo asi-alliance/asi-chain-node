@@ -7,10 +7,10 @@ import cats.effect.concurrent.Ref
 import cats.syntax.all._
 import com.google.protobuf.ByteString
 import com.typesafe.scalalogging.Logger
-import coop.rchain.casper.protocol.BlockMessage
+import coop.rchain.casper.protocol.{BlockMessage, DeployData => CasperDeployData}
 import coop.rchain.crypto.PublicKey
 import coop.rchain.crypto.hash.{Blake2b256, Keccak256, Sha256}
-import coop.rchain.crypto.signatures.{Ed25519, Secp256k1}
+import coop.rchain.crypto.signatures.{Ed25519, Secp256k1, Signed}
 import coop.rchain.metrics.Span
 import coop.rchain.rholang.interpreter.errors
 import coop.rchain.models.Expr.ExprInstance.GString
@@ -53,6 +53,7 @@ trait SystemProcesses[F[_]] {
   def keccak256Hash: Contract[F]
   def blake2b256Hash: Contract[F]
   def getBlockData(blockData: Ref[F, SystemProcesses.BlockData]): Contract[F]
+  def getDeployData(blockData: Ref[F, SystemProcesses.DeployData]): Contract[F]
   def invalidBlocks(invalidBlocks: SystemProcesses.InvalidBlocks[F]): Contract[F]
   def revAddress: Contract[F]
   def deployerIdOps: Contract[F]
@@ -61,6 +62,9 @@ trait SystemProcesses[F[_]] {
   def gpt4: Contract[F]
   def dalle3: Contract[F]
   def textToAudio: Contract[F]
+  def ollamaChat: Contract[F]
+  def ollamaGenerate: Contract[F]
+  def ollamaModels: Contract[F]
   def grpcTell: Contract[F]
   def devNull: Contract[F]
   def abort: Contract[F]
@@ -95,6 +99,38 @@ object SystemProcesses {
       seqNum: Int
   )
 
+  object BlockData {
+    def empty: BlockData = BlockData(0, 0, PublicKey(Base16.unsafeDecode("00")), 0)
+    def fromBlock(template: BlockMessage) =
+      BlockData(
+        template.header.timestamp,
+        template.body.state.blockNumber,
+        PublicKey(template.sender),
+        template.seqNum
+      )
+  }
+
+  final case class DeployData private (
+      timestamp: Long,
+      deployerId: PublicKey,
+      deployId: ByteString
+  )
+
+  object DeployData {
+    def empty: DeployData =
+      DeployData(
+        0,
+        PublicKey(Base16.unsafeDecode("00")),
+        ByteString.copyFrom(Base16.unsafeDecode("00"))
+      )
+    def fromDeploy(template: Signed[CasperDeployData]) =
+      DeployData(
+        template.data.timestamp,
+        template.pk,
+        template.sig
+      )
+  }
+
   def byteName(b: Byte): Par = GPrivate(ByteString.copyFrom(Array[Byte](b)))
 
   object FixedChannels {
@@ -122,6 +158,10 @@ object SystemProcesses {
     val GRPC_TELL: Par          = byteName(25)
     val DEV_NULL: Par           = byteName(26)
     val ABORT: Par              = byteName(27)
+    val OLLAMA_CHAT: Par        = byteName(28)
+    val OLLAMA_GENERATE: Par    = byteName(29)
+    val OLLAMA_MODELS: Par      = byteName(30)
+    val DEPLOY_DATA: Par        = byteName(31)
   }
   object BodyRefs {
     val STDOUT: Long             = 0L
@@ -145,12 +185,19 @@ object SystemProcesses {
     val GRPC_TELL: Long          = 23L
     val DEV_NULL: Long           = 24L
     val ABORT: Long              = 25L
+    val OLLAMA_CHAT: Long        = 26L
+    val OLLAMA_GENERATE: Long    = 27L
+    val OLLAMA_MODELS: Long      = 28L
+    val DEPLOY_DATA: Long        = 29L
   }
 
   val nonDeterministicCalls: Set[Long] = Set(
     BodyRefs.GPT4,
     BodyRefs.DALLE3,
-    BodyRefs.TEXT_TO_AUDIO
+    BodyRefs.TEXT_TO_AUDIO,
+    BodyRefs.OLLAMA_CHAT,
+    BodyRefs.OLLAMA_GENERATE,
+    BodyRefs.OLLAMA_MODELS
   )
 
   final case class ProcessContext[F[_]: Concurrent: Span: Log](
@@ -158,6 +205,7 @@ object SystemProcesses {
       dispatcher: RhoDispatch[F],
       blockData: Ref[F, BlockData],
       invalidBlocks: InvalidBlocks[F],
+      deployData: Ref[F, DeployData],
       externalServices: ExternalServices
   ) {
     val systemProcesses = SystemProcesses[F](dispatcher, space, externalServices)
@@ -183,16 +231,7 @@ object SystemProcesses {
     def toProcDefs: (Name, Arity, Remainder, BodyRef) =
       (fixedChannel, arity, remainder, bodyRef)
   }
-  object BlockData {
-    def empty: BlockData = BlockData(0, 0, PublicKey(Base16.unsafeDecode("00")), 0)
-    def fromBlock(template: BlockMessage) =
-      BlockData(
-        template.header.timestamp,
-        template.body.state.blockNumber,
-        PublicKey(template.sender),
-        template.seqNum
-      )
-  }
+
   type Contract[F[_]] = (Seq[ListParWithRandom], Boolean, Seq[Par]) => F[Seq[Par]]
 
   def apply[F[_]](
@@ -212,6 +251,7 @@ object SystemProcesses {
 
       private val stdOutLogger = Logger("coop.rchain.rholang.stdout")
       private val stdErrLogger = Logger("coop.rchain.rholang.stderr")
+      private val logger       = Logger("coop.rchain.rholang.ollama")
 
       private def illegalArgumentException(msg: String): F[Seq[Par]] =
         F.raiseError(new IllegalArgumentException(msg))
@@ -509,6 +549,69 @@ object SystemProcesses {
         }
       }
 
+      def ollamaChat: Contract[F] = {
+        case isContractCall(produce, true, previousOutput, Seq(_, _, ack)) => {
+          logger.info(s"ollamaChat: called in replay mode")
+          produce(previousOutput, ack).map(_ => previousOutput)
+        }
+
+        case isContractCall(
+            produce,
+            _,
+            _,
+            Seq(RhoType.String(model), RhoType.String(prompt), ack)
+            ) => {
+
+          logger.info(s"ollamaChat: called in real mode: $prompt")
+          (for {
+            response <- externalServices.ollamaService.chatCompletion(model, prompt)
+            output   = Seq(RhoType.String(response))
+            _        <- produce(output, ack)
+          } yield output).recoverWith {
+            case e => // API error
+              NonDeterministicProcessFailure(outputNotProduced = Seq.empty, cause = e).raiseError
+          }
+        }
+      }
+
+      def ollamaGenerate: Contract[F] = {
+        case isContractCall(produce, true, previousOutput, Seq(_, _, ack)) => {
+          produce(previousOutput, ack).map(_ => previousOutput)
+        }
+        case isContractCall(
+            produce,
+            _,
+            _,
+            Seq(RhoType.String(model), RhoType.String(prompt), ack)
+            ) => {
+          (for {
+            response <- externalServices.ollamaService.textGeneration(model, prompt)
+            output   = Seq(RhoType.String(response))
+            _        <- produce(output, ack)
+          } yield output).recoverWith {
+            case e => // API error
+              NonDeterministicProcessFailure(outputNotProduced = Seq.empty, cause = e).raiseError
+          }
+        }
+      }
+
+      def ollamaModels: Contract[F] = {
+        case isContractCall(produce, true, previousOutput, Seq(ack)) => {
+          produce(previousOutput, ack).map(_ => previousOutput)
+        }
+        case isContractCall(produce, _, _, Seq(ack)) => {
+          (for {
+            models    <- externalServices.ollamaService.listModels()
+            modelPars = models.map(model => Par(exprs = Seq(Expr(GString(model)))))
+            output    = Seq(Par(exprs = Seq(EList(modelPars))))
+            _         <- produce(output, ack)
+          } yield output).recoverWith {
+            case e => // API error
+              NonDeterministicProcessFailure(outputNotProduced = Seq.empty, cause = e).raiseError
+          }
+        }
+      }
+
       override def grpcTell: Contract[F] = {
         case isContractCall(_, true, previous, _) =>
           F.delay(previous)
@@ -577,6 +680,26 @@ object SystemProcesses {
           } yield output
         case _ =>
           illegalArgumentException("blockData expects only a return channel")
+      }
+
+      def getDeployData(
+          deployData: Ref[F, DeployData]
+      ): Contract[F] = {
+        case isContractCall(produce, _, _, Seq(ack)) =>
+          for {
+            data <- deployData.get
+            output = Seq(
+              RhoType.Number(data.timestamp),
+              RhoType.DeployerId(data.deployerId.bytes),
+              RhoType.DeployId(data.deployId)
+            )
+            _ <- produce(
+                  output,
+                  ack
+                )
+          } yield output
+        case _ =>
+          illegalArgumentException("deployData expects only a return channel")
       }
 
       def invalidBlocks(invalidBlocks: InvalidBlocks[F]): Contract[F] = {

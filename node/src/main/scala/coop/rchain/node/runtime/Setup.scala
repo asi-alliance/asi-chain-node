@@ -8,7 +8,7 @@ import coop.rchain.models.syntax._
 import cats.syntax.all._
 import coop.rchain.blockstorage.KeyValueBlockStore
 import coop.rchain.blockstorage.casperbuffer.CasperBufferKeyValueStorage
-import coop.rchain.blockstorage.dag.BlockDagKeyValueStorage
+import coop.rchain.blockstorage.dag.{BlockDagKeyValueStorage, BlockDagStorage}
 import coop.rchain.blockstorage.deploy.KeyValueDeployStorage
 import coop.rchain.blockstorage.finality.LastFinalizedKeyValueStorage
 import coop.rchain.casper._
@@ -28,6 +28,7 @@ import coop.rchain.comm.rp.Connect.ConnectionsCell
 import coop.rchain.comm.rp.RPConf
 import coop.rchain.comm.transport.TransportLayer
 import coop.rchain.crypto.PrivateKey
+import coop.rchain.node.instances.HeartbeatProposer
 import coop.rchain.metrics.{Metrics, Span}
 import coop.rchain.models.BlockHash.BlockHash
 import coop.rchain.models.Par
@@ -43,12 +44,12 @@ import coop.rchain.node.web.ReportingRoutes.ReportingHttpRoutes
 import coop.rchain.node.web.{ReportingRoutes, Transaction}
 import coop.rchain.p2p.effects.PacketHandler
 import coop.rchain.rholang.externalservices.ExternalServices
-import coop.rchain.rholang.externalservices.NoOpExternalServices
 import coop.rchain.rholang.interpreter.RhoRuntime
 import coop.rchain.rspace.state.instances.RSpaceStateManagerImpl
 import coop.rchain.rspace.syntax._
 import coop.rchain.shared._
 import coop.rchain.shared.syntax.sharedSyntaxKeyValueStoreManager
+import fs2.Stream
 import fs2.concurrent.Queue
 import monix.execution.Scheduler
 
@@ -68,6 +69,7 @@ object Setup {
         APIServers,
         CasperLoop[F],
         CasperLoop[F],
+        CasperLoop[F],
         EngineInit[F],
         CasperLaunch[F],
         ReportingHttpRoutes[F],
@@ -80,7 +82,8 @@ object Setup {
         BlockProcessor[F],
         Ref[F, Set[BlockHash]],
         Queue[F, (Casper[F], BlockMessage)],
-        Option[ProposeFunction[F]]
+        Option[ProposeFunction[F]],
+        Stream[F, Unit]
     )
   ] =
     for {
@@ -160,7 +163,13 @@ object Setup {
         implicit val sp = span
         rnodeStoreManager.evalStores.flatMap(
           RhoRuntime
-            .createRuntime[F](_, Par(), false, Seq.empty, NoOpExternalServices)
+            .createRuntime[F](
+              _,
+              Par(),
+              false,
+              Seq.empty,
+              ExternalServices.forNodeType(isValidator = false)
+            )
         )
       }
 
@@ -229,7 +238,11 @@ object Setup {
         val dummyDeployerKey          = dummyDeployerKeyOpt.flatMap(Base16.decode(_)).map(PrivateKey(_))
 
         // TODO make term for dummy deploy configurable
-        Proposer[F](validatorIdentity, dummyDeployerKey.map((_, "Nil")))
+        Proposer[F](
+          validatorIdentity,
+          dummyDeployerKey.map((_, "Nil")),
+          allowEmptyBlocks = conf.casper.heartbeat.enabled
+        )
       }
 
       // Propose request is a tuple - Casper, async flag and deferred proposer result that will be resolved by proposer
@@ -328,6 +341,48 @@ object Setup {
           _ <- Running.updateForkChoiceTipsIfStuck(conf.casper.forkChoiceStaleThreshold)
         } yield ()
       }
+      // Garbage collect mergeable channels data that is provably unreachable
+      // Only runs when enable-mergeable-channel-gc is true
+      mergeableChannelsGCLoop = {
+        implicit val bs                            = blockStore
+        implicit val bds                           = blockDagStorage
+        implicit val metricsSource: Metrics.Source = Metrics.BaseSource
+        val casperShardConf = CasperShardConf(
+          conf.casper.faultToleranceThreshold,
+          conf.casper.shardName,
+          conf.casper.parentShardId,
+          conf.casper.finalizationRate,
+          conf.casper.maxNumberOfParents,
+          conf.casper.maxParentDepth.getOrElse(Int.MaxValue),
+          conf.casper.synchronyConstraintThreshold.toFloat,
+          conf.casper.heightConstraintThreshold,
+          50,
+          1,
+          1,
+          conf.casper.genesisBlockData.bondMinimum,
+          conf.casper.genesisBlockData.bondMaximum,
+          conf.casper.genesisBlockData.epochLength,
+          conf.casper.genesisBlockData.quarantineLength,
+          conf.casper.minPhloPrice,
+          conf.casper.enableMergeableChannelGC,
+          conf.casper.mergeableChannelsGCDepthBuffer
+        )
+        for {
+          _ <- if (conf.casper.enableMergeableChannelGC) {
+                for {
+                  dag <- BlockDagStorage[F].getRepresentation
+                  _ <- coop.rchain.casper.util.MergeableChannelsGC.collectGarbage(
+                        dag,
+                        runtimeManager,
+                        casperShardConf
+                      )
+                } yield ()
+              } else {
+                Sync[F].unit
+              }
+          _ <- Time[F].sleep(conf.casper.mergeableChannelsGCInterval)
+        } yield ()
+      }
       engineInit = engineCell.read >>= (_.init)
       runtimeCleanup = NodeRuntime.cleanup(
         rnodeStoreManager
@@ -362,11 +417,24 @@ object Setup {
           proposerStateRefOpt
         )
       }
+      heartbeatStream = {
+        implicit val ec = engineCell
+        // Heartbeat should only run on bonded validator nodes
+        // It will check the active validators set before proposing
+        (validatorIdentityOpt, triggerProposeFOpt) match {
+          case (Some(validatorIdentity), Some(triggerPropose)) =>
+            HeartbeatProposer.create[F](triggerPropose, validatorIdentity, conf.casper.heartbeat)
+          case _ =>
+            // No validator identity or no propose function - skip heartbeat
+            Stream.empty
+        }
+      }
     } yield (
       packetHandler,
       apiServers,
       casperLoop,
       updateForkChoiceLoop,
+      mergeableChannelsGCLoop,
       engineInit,
       casperLaunch,
       reportingRoutes,
@@ -378,6 +446,7 @@ object Setup {
       blockProcessor,
       blockProcessorStateRef,
       blockProcessorQueue,
-      triggerProposeFOpt
+      triggerProposeFOpt,
+      heartbeatStream
     )
 }

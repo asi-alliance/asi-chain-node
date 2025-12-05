@@ -55,7 +55,7 @@ in {
   // }
 
   new MakeNode, ByteArrayToNybbleList,
-      TreeHashMapSetter, TreeHashMapGetter, TreeHashMapContains, TreeHashMapUpdater,
+      TreeHashMapSetter, TreeHashMapGetter, TreeHashMapContains, TreeHashMapUpdater, TreeHashMapDeleter,
       powersCh, storeToken, nodeGet, depthP in {
     match [1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536] {
       powers => {
@@ -317,6 +317,7 @@ in {
             }
           }
         } |
+
         contract TreeHashMap(@"update", @map, @key, update, ret) = {
           new hashCh, nybListCh, keccak256Hash(`rho:crypto:keccak256Hash`) in {
             // Hash the key to get a 256-bit array
@@ -327,6 +328,73 @@ in {
                 ByteArrayToNybbleList!(hash, 0, depth, [], *nybListCh) |
                 for (@nybList <- nybListCh) {
                   TreeHashMapUpdater!(map, nybList, 0, 2 * depth, *update, hash.slice(depth, 32), *ret)
+                }
+              }
+            }
+          }
+        } |
+
+        contract TreeHashMap(@"getOrElse", @map, @key, valueCh, nilCh) = {
+          new retCh in {
+            TreeHashMap!("get", map, key, *retCh) |
+            for(@value <- retCh) {
+              match value {
+                Nil => nilCh!()
+                value => valueCh!(value)
+              }
+            }
+          }
+        } |
+
+        contract TreeHashMap(@"delete", @map, @key, ret) = {
+          new hashCh, nybListCh, keccak256Hash(`rho:crypto:keccak256Hash`) in {
+            // Hash the key to get a 256-bit array
+            keccak256Hash!(key.toByteArray(), *hashCh) |
+            for (@hash <- hashCh) {
+              for (@depth <<- @(map, *depthP)) {
+                // Get the bit list
+                ByteArrayToNybbleList!(hash, 0, depth, [], *nybListCh) |
+                for (@nybList <- nybListCh) {
+                  TreeHashMapDeleter!(map, nybList, 0, 2 * depth, hash.slice(depth, 32), *ret)
+                }
+              }
+            }
+          }
+        } |
+
+        contract TreeHashMapDeleter(@map, @nybList, @n, @len, @suffix, ret) = {
+          // Look up the value of the node at [map, nybList.slice(0, n + 1)
+          new valCh in {
+            match (map, nybList.slice(0, n)) {
+              node => {
+                for (@val <<- @[node, *storeToken]) {
+                  if (n == len) {
+                    // We're at the end of the path.
+                    if (val == 0) {
+                      // There's nothing here.
+                      // Return
+                      ret!(Nil)
+                    } else {
+                      // Acquire the lock on this node
+                      for (@val <- @[node, *storeToken]) {
+                        // Release the lock
+                        @[node, *storeToken]!(val.delete(suffix)) |
+                        // Return
+                        ret!(val.get(suffix))
+                      }
+                    }
+                  } else {
+                    // Otherwise try to reach the end of the path.
+                    // Bit k set means child node k exists.
+                    if ((val/powers.nth(nybList.nth(n))) % 2 == 0) {
+                      // If the path doesn't exist, there's no value to delete.
+                      // Return
+                      ret!(Nil)
+                    } else {
+                      // Child node exists, loop
+                      TreeHashMapDeleter!(map, nybList, n + 1, len, suffix, *ret)
+                    }
+                  }
                 }
               }
             }
@@ -392,49 +460,92 @@ in {
   bootstrapInsertSigned!(*insertSignedCh) | // this will work only once
   for (insertSigned <- insertSignedCh) {
 
-    contract insertSigned(@pubKeyBytes, @value, @sig, ret) = {
-      match value {
-        (nonce, data) => {
-          new uriCh, hashCh, verifyCh in {
-            blake2b256!((nonce, data).toByteArray(), *hashCh) |
-            for (@hash <- hashCh) {
-              secpVerify!(hash, sig, pubKeyBytes, *verifyCh) |
-              for (@verified <- verifyCh) {
-                if (verified) {
-                  ops!("buildUri", pubKeyBytes, *uriCh) |
-                  for (@uri <- uriCh) {
-                    for (@map <<- _registryStore) {
-                      new responseCh in {
-                        TreeHashMap!("get", map, uri, *responseCh) |
-                        for (@response <- responseCh) {
-                          match response {
-                            Nil => {
-                              new ack in {
-                                TreeHashMap!("set", map, uri, (nonce, data), *ack) |
-                                for (_ <- ack) {
-                                  ret!(uri)
-                                }
-                              }
-                            }
-                            (oldNonce, _) => {
-                              if (nonce > oldNonce) {
-                                new ack in {
-                                  TreeHashMap!("set", map, uri, (nonce, data), *ack) |
-                                  for (_ <- ack) {
-                                    ret!(uri)
-                                  }
-                                }
-                              } else {
-                                ret!(Nil)
-                              }
-                            }
-                          }
-                        }
-                      }
+    // Inserts signed data into storage only if the version is newer
+    // than the previously stored version and the signature is valid.
+    // The public key is used both for generating a unique URI
+    // and for verifying the signature.
+    //
+    // There are 2 public keys involved in insertSigned:
+    // * deployer public key, used to sign the deployment
+    // * URI public key, used to generate URIs
+    // The user need to sign (deploy timestamp, deployerPubKey, version)
+    // with the private key that coresponds to the uri key. This way the user
+    // proves that he holds both private keys: the deployer private key,
+    // because he was able to sign the deployment, and the uri private key
+    // because he was able to sign (deploy timestamp, deployerPubKey, version).
+    //
+    // Parameters:
+    //   pubKeyBytes : ByteArray
+    //       The URI public key
+    //
+    //   version : Int
+    //       The version number of the data. Only newer versions
+    //       (greater than the previously stored version) can be inserted.
+    //
+    //   data : Any
+    //       The actual data payload to be stored.
+    //
+    //   sig : ByteArray
+    //       The signature that must be valid for the tuple:
+    //       (deploy timestamp, deployerPubKey, version)
+    //
+    //   ret : Channel
+    //       The return channel. Will return a uri indicating success or failure.
+    contract insertSigned(@pubKeyBytes, @(version, data), @sig, ret) = {
+      new uriCh,
+          hashCh,
+          verifyCh,
+          deployData(`rho:deploy:data`),
+          deployDataCh,
+          deployerIdOps(`rho:rchain:deployerId:ops`),
+          deployerPubKeyCh
+      in {
+        deployData!(*deployDataCh) |
+
+        for(@timestamp, @deployerId, _ <- deployDataCh) {
+          deployerIdOps!("pubKeyBytes", deployerId, *deployerPubKeyCh) |
+
+          for(@deployerPubKey <- deployerPubKeyCh) {
+            blake2b256!((timestamp, deployerPubKey, version).toByteArray(), *hashCh)
+          }
+        } |
+
+        for (@hash <- hashCh) {
+          secpVerify!(hash, sig, pubKeyBytes, *verifyCh)
+        } |
+
+        for (@verified <- verifyCh) {
+          if (verified) {
+            ops!("buildUri", pubKeyBytes, *uriCh)
+          } else {
+            ret!(Nil)
+          }
+        } |
+
+        for (@uri <- uriCh; @map <<- _registryStore) {
+          new responseCh in {
+            TreeHashMap!("get", map, uri, *responseCh) |
+            for (@response <- responseCh) {
+              match response {
+                Nil => {
+                  new ack in {
+                    TreeHashMap!("set", map, uri, (version, data), *ack) |
+                    for (_ <- ack) {
+                      ret!(uri)
                     }
                   }
-                } else {
-                  ret!(Nil)
+                }
+                (oldVersion, _) => {
+                  if (version > oldVersion) {
+                    new ack in {
+                      TreeHashMap!("set", map, uri, (version, data), *ack) |
+                      for (_ <- ack) {
+                        ret!(uri)
+                      }
+                    }
+                  } else {
+                    ret!(Nil)
+                  }
                 }
               }
             }
