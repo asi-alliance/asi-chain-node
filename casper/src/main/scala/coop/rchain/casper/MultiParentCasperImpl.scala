@@ -132,14 +132,23 @@ class MultiParentCasperImpl[F[_]
           _ <- BlockIndex.cache.remove(h).pure
 
           // Remove block post-state mergeable channels from persistent store
+          // When GC enabled: Skip immediate deletion, let background GC handle it safely
+          // When GC disabled: Delete immediately (legacy behavior)
           stateHash = block.body.state.postStateHash.toBlake2b256Hash.bytes
-          _         <- RuntimeManager[F].getMergeableStore.delete(stateHash)
+          _ <- if (casperShardConf.enableMergeableChannelGC) {
+                // GC enabled: defer to background GC for safe deletion
+                ().pure[F]
+              } else {
+                // GC disabled: immediate deletion (legacy)
+                RuntimeManager[F].getMergeableStore.delete(stateHash)
+              }
+          // Publish BlockFinalised event for each newly finalized block
+          _ <- EventPublisher[F].publish(MultiParentCasperImpl.finalisedEvent(block))
         } yield ()
       }.void
 
     def newLfbFoundEffect(newLfb: BlockHash): F[Unit] =
-      BlockDagStorage[F].recordDirectlyFinalized(newLfb, processFinalised) >>
-        EventPublisher[F].publish(RChainEvent.blockFinalised(newLfb.toHexString))
+      BlockDagStorage[F].recordDirectlyFinalized(newLfb, processFinalised)
 
     implicit val ms = CasperMetricsSource
 
@@ -286,48 +295,98 @@ class MultiParentCasperImpl[F[_]
       b: BlockMessage,
       s: CasperSnapshot[F]
   ): F[Either[BlockError, ValidBlock]] = {
+    // Helper to time and log individual validation steps
+    def timedStep[A](
+        stepName: String,
+        step: F[Either[BlockError, A]]
+    ): EitherT[F, BlockError, (A, String)] =
+      for {
+        _ <- EitherT.liftF(Span[F].mark(s"before-$stepName"))
+        result <- EitherT(Stopwatch.durationRaw(step).flatMap {
+                   case (eitherResult, elapsedDuration) =>
+                     val elapsed    = Stopwatch.showTime(elapsedDuration)
+                     val stepTimeMs = elapsedDuration.toMillis
+                     // Record metric for this validation step
+                     Metrics[F]
+                       .record(s"block.validation.step.$stepName.time", stepTimeMs)(
+                         Metrics.Source(CasperMetricsSource, "casper")
+                       )
+                       .as(eitherResult.map(r => (r, elapsed)))
+                 })
+        _ <- EitherT.liftF(Span[F].mark(s"after-$stepName"))
+      } yield result
+
     val validationProcess: EitherT[F, BlockError, ValidBlock] =
       for {
-        _ <- EitherT(
-              Validate
-                .blockSummary(b, approvedBlock, s, casperShardConf.shardName, deployLifespan)
-            )
-        _ <- EitherT.liftF(Span[F].mark("post-validation-block-summary"))
-        _ <- EitherT(
-              InterpreterUtil
-                .validateBlockCheckpoint(b, s, RuntimeManager[F])
-                .map {
-                  case Left(ex)       => Left(ex)
-                  case Right(Some(_)) => Right(BlockStatus.valid)
-                  case Right(None)    => Left(BlockStatus.invalidTransaction)
-                }
-            )
-        _ <- EitherT.liftF(Span[F].mark("transactions-validated"))
-        _ <- EitherT(Validate.bondsCache(b, RuntimeManager[F]))
-        _ <- EitherT.liftF(Span[F].mark("bonds-cache-validated"))
-        _ <- EitherT(Validate.neglectedInvalidBlock(b, s))
-        _ <- EitherT.liftF(Span[F].mark("neglected-invalid-block-validated"))
-        _ <- EitherT(
-              EquivocationDetector.checkNeglectedEquivocationsWithUpdate(b, s.dag, approvedBlock)
-            )
-        _ <- EitherT.liftF(Span[F].mark("neglected-equivocation-validated"))
+        result1 <- timedStep(
+                    "block-summary",
+                    Validate
+                      .blockSummary(b, approvedBlock, s, casperShardConf.shardName, deployLifespan)
+                  )
+        t1 = result1._2
+        _  <- EitherT.liftF(Span[F].mark("post-validation-block-summary"))
+
+        result2 <- timedStep(
+                    "checkpoint",
+                    InterpreterUtil
+                      .validateBlockCheckpoint(b, s, RuntimeManager[F])
+                      .map {
+                        case Left(ex)       => Left(ex)
+                        case Right(Some(_)) => Right(BlockStatus.valid)
+                        case Right(None)    => Left(BlockStatus.invalidTransaction)
+                      }
+                  )
+        t2 = result2._2
+        _  <- EitherT.liftF(Span[F].mark("transactions-validated"))
+
+        result3 <- timedStep("bonds-cache", Validate.bondsCache(b, RuntimeManager[F]))
+        t3      = result3._2
+        _       <- EitherT.liftF(Span[F].mark("bonds-cache-validated"))
+
+        result4 <- timedStep("neglected-invalid-block", Validate.neglectedInvalidBlock(b, s))
+        t4      = result4._2
+        _       <- EitherT.liftF(Span[F].mark("neglected-invalid-block-validated"))
+
+        result5 <- timedStep(
+                    "neglected-equivocation",
+                    EquivocationDetector
+                      .checkNeglectedEquivocationsWithUpdate(b, s.dag, approvedBlock)
+                  )
+        t5 = result5._2
+        _  <- EitherT.liftF(Span[F].mark("neglected-equivocation-validated"))
 
         // This validation is only to punish validator which accepted lower price deploys.
         // And this can happen if not configured correctly.
         minPhloPrice = casperShardConf.minPhloPrice
-        _ <- EitherT(Validate.phloPrice(b, minPhloPrice)).recoverWith {
-              case _ =>
-                val warnToLog = EitherT.liftF[F, BlockError, Unit](
-                  Log[F].warn(s"One or more deploys has phloPrice lower than $minPhloPrice")
-                )
-                val asValid = EitherT.rightT[F, BlockError](BlockStatus.valid)
-                warnToLog *> asValid
-            }
-        _ <- EitherT.liftF(Span[F].mark("phlogiston-price-validated"))
+        result6 <- timedStep(
+                    "phlo-price",
+                    Validate.phloPrice(b, minPhloPrice).recoverWith {
+                      case _ =>
+                        Log[F]
+                          .warn(s"One or more deploys has phloPrice lower than $minPhloPrice")
+                          .as(BlockStatus.valid.asRight[BlockError])
+                    }
+                  )
+        t6 = result6._2
+        _  <- EitherT.liftF(Span[F].mark("phlogiston-price-validated"))
 
         depDag <- EitherT.liftF(CasperBufferStorage[F].toDoublyLinkedDag)
-        status <- EitherT(EquivocationDetector.checkEquivocations(depDag, b, s.dag))
+        result7 <- timedStep(
+                    "simple-equivocation",
+                    EquivocationDetector.checkEquivocations(depDag, b, s.dag)
+                  )
+        status = result7._1
+        t7     = result7._2
         _      <- EitherT.liftF(Span[F].mark("equivocation-validated"))
+
+        // Log detailed timing breakdown
+        _ <- EitherT.liftF(
+              Log[F].debug(
+                s"Validation timing breakdown: " +
+                  s"summary=$t1, checkpoint=$t2, bonds=$t3, neglected-invalid=$t4, " +
+                  s"neglected-equiv=$t5, phlo=$t6, simple-equiv=$t7"
+              )
+            )
       } yield status
 
     val blockPreState  = b.body.state.preStateHash
@@ -349,14 +408,20 @@ class MultiParentCasperImpl[F[_]
     } yield ()
 
     val validationProcessDiag = for {
-      // Create block and measure duration
-      r                    <- Stopwatch.duration(validationProcess.value)
-      (valResult, elapsed) = r
+      // Execute validation with accurate Kamon metric recording
+      // Note: Metrics[F].timer properly measures and records the metric without double-counting
+      // inner timing measurements that may exist in validationProcess
+      valResult <- Metrics[F].timer(
+                    "block.processing.stage.replay.time",
+                    validationProcess.value
+                  )(Metrics.Source(CasperMetricsSource, "casper"))
+
+      // Log validation result
       _ <- valResult
             .map { status =>
               val blockInfo   = PrettyPrinter.buildString(b, short = true)
               val deployCount = b.body.deploys.size
-              Log[F].info(s"Block replayed: $blockInfo (${deployCount}d) ($status) [$elapsed]") <*
+              Log[F].info(s"Block replayed: $blockInfo (${deployCount}d) ($status)") <*
                 indexBlock.whenA(casperShardConf.maxNumberOfParents > 1)
             }
             .getOrElse(().pure[F])
@@ -369,6 +434,7 @@ class MultiParentCasperImpl[F[_]
     for {
       updatedDag <- BlockDagStorage[F].insert(block, invalid = false)
       _          <- CasperBufferStorage[F].remove(block.blockHash)
+      _          <- EventPublisher[F].publish(addedEvent(block))
       _          <- updateLastFinalizedBlock(block)
     } yield updatedDag
 
@@ -452,24 +518,36 @@ object MultiParentCasperImpl {
   val deployLifespan = 50
 
   def addedEvent(block: BlockMessage): RChainEvent = {
-    val (blockHash, parents, justifications, deployIds, creator, seqNum) = blockEvent(block)
+    val (blockHash, parents, justifications, deploys, creator, seqNum) = blockEvent(block)
     RChainEvent.blockAdded(
       blockHash,
       parents,
       justifications,
-      deployIds,
+      deploys,
       creator,
       seqNum
     )
   }
 
   def createdEvent(b: BlockMessage): RChainEvent = {
-    val (blockHash, parents, justifications, deployIds, creator, seqNum) = blockEvent(b)
+    val (blockHash, parents, justifications, deploys, creator, seqNum) = blockEvent(b)
     RChainEvent.blockCreated(
       blockHash,
       parents,
       justifications,
-      deployIds,
+      deploys,
+      creator,
+      seqNum
+    )
+  }
+
+  def finalisedEvent(b: BlockMessage): RChainEvent = {
+    val (blockHash, parents, justifications, deploys, creator, seqNum) = blockEvent(b)
+    RChainEvent.blockFinalised(
+      blockHash,
+      parents,
+      justifications,
+      deploys,
       creator,
       seqNum
     )
@@ -483,10 +561,19 @@ object MultiParentCasperImpl {
     val justificationHashes =
       block.justifications.toList
         .map(j => (j.validator.toHexString, j.latestBlockHash.toHexString))
-    val deployIds: List[String] =
-      block.body.deploys.map(pd => PrettyPrinter.buildStringNoLimit(pd.deploy.sig))
+    val deploys =
+      block.body.deploys
+        .map(
+          pd =>
+            DeployEvent(
+              PrettyPrinter.buildStringNoLimit(pd.deploy.sig),
+              pd.cost.cost,
+              PrettyPrinter.buildStringNoLimit(pd.deploy.pk.bytes),
+              pd.isFailed
+            )
+        )
     val creator = block.sender.toHexString
     val seqNum  = block.seqNum
-    (blockHash, parentHashes, justificationHashes, deployIds, creator, seqNum)
+    (blockHash, parentHashes, justificationHashes, deploys, creator, seqNum)
   }
 }

@@ -113,7 +113,7 @@ final case class Options(arguments: Seq[String]) extends ScallopConf(arguments) 
   val width = 120
 
   version(
-    s"RChain node | gRPC client \nversion ${BuildInfo.version} (${BuildInfo.gitHeadCommit.getOrElse("commit # unknown")})"
+    s"RChain node | gRPC client \nversion ${BuildInfo.version} (${BuildInfo.gitHeadCommit})"
   )
   printedName = "rchain"
   helpWidth(width)
@@ -157,6 +157,7 @@ final case class Options(arguments: Seq[String]) extends ScallopConf(arguments) 
     helpWidth(width)
 
     val configFile = opt[Path](
+      name = "config",
       short = 'c',
       descr = "Path to the configuration file for RNode server. For the reference see " +
         "https://github.com/rchain/rchain/blob/dev/node/src/main/resources/reference.conf"

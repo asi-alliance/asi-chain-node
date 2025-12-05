@@ -3,7 +3,13 @@ package coop.rchain.node.configuration.commandline
 import java.nio.file.Paths
 
 import scala.concurrent.duration._
-import coop.rchain.casper.{CasperConf, GenesisBlockData, GenesisCeremonyConf, RoundRobinDispatcher}
+import coop.rchain.casper.{
+  CasperConf,
+  GenesisBlockData,
+  GenesisCeremonyConf,
+  HeartbeatConf,
+  RoundRobinDispatcher
+}
 import coop.rchain.comm.{CommError, PeerNode}
 import coop.rchain.node.configuration.{
   ApiServer,
@@ -17,7 +23,13 @@ import coop.rchain.node.configuration.{
 }
 import com.typesafe.config.ConfigFactory
 import coop.rchain.casper.util.GenesisBuilder
-import coop.rchain.casper.{CasperConf, GenesisBlockData, GenesisCeremonyConf, RoundRobinDispatcher}
+import coop.rchain.casper.{
+  CasperConf,
+  GenesisBlockData,
+  GenesisCeremonyConf,
+  HeartbeatConf,
+  RoundRobinDispatcher
+}
 import coop.rchain.comm.transport.TlsConf
 import coop.rchain.comm.{CommError, PeerNode}
 import coop.rchain.node.configuration._
@@ -165,6 +177,15 @@ class ConfigMapperSpec extends FunSuite with Matchers {
       openai = Some(
         OpenAIConf(apiKey = "", enabled = false, validateApiKey = true, validationTimeoutSec = 15)
       ), // defaults from config
+      ollama = Some(
+        OllamaConf(
+          enabled = false,
+          baseUrl = "http://localhost:11434",
+          defaultModel = "llama4:latest",
+          validateConnection = true,
+          timeoutSec = 30
+        )
+      ), // defaults from config
       protocolClient = ProtocolClient(
         networkId = "testnet",
         bootstrap = PeerNode
@@ -255,7 +276,15 @@ class ConfigMapperSpec extends FunSuite with Matchers {
           genesisValidatorMode = true,
           ceremonyMasterMode = true
         ),
-        minPhloPrice = 1
+        minPhloPrice = 1,
+        enableMergeableChannelGC = false,
+        mergeableChannelsGCInterval = 5.minutes,
+        mergeableChannelsGCDepthBuffer = 10,
+        heartbeat = HeartbeatConf(
+          enabled = false,
+          checkInterval = 30.seconds,
+          maxLfbAge = 60.seconds
+        )
       ),
       metrics = Metrics(
         prometheus = true,

@@ -12,6 +12,12 @@ import coop.rchain.rholang.externalservices.NoOpExternalServices
 import coop.rchain.rholang.interpreter.RhoRuntime.{RhoHistoryRepository, RhoISpace}
 import coop.rchain.rholang.interpreter.SystemProcesses.Definition
 import coop.rchain.rholang.interpreter.{ReplayRhoRuntime, RhoRuntime, RholangCLI}
+import coop.rchain.rholang.externalservices.{
+  GrpcClientService,
+  OllamaServiceMock,
+  OpenAIServiceMock,
+  TestExternalServices
+}
 import coop.rchain.rspace
 import coop.rchain.rspace.RSpace.RSpaceStore
 import coop.rchain.rspace.syntax.rspaceSyntaxKeyValueStoreManager
@@ -30,15 +36,18 @@ object Resources {
   def mkTempDir[F[_]: Sync](prefix: String): Resource[F, Path] =
     Resource.makeCase(Sync[F].delay(Files.createTempDirectory(prefix)))(
       (path, exitCase) =>
-        Sync[F].delay(exitCase match {
-          case Error(ex) =>
-            logger
-              .error(
-                s"Exception thrown while using the tempDir '$path'. Temporary dir NOT deleted.",
+        Sync[F].delay {
+          exitCase match {
+            case Error(ex) =>
+              logger.error(
+                s"Exception thrown while using the tempDir '$path'. Cleaning up temporary dir anyway.",
                 ex
               )
-          case _ => new Directory(new File(path.toString)).deleteRecursively()
-        })
+            case _ => ()
+          }
+          // Always delete the temp directory, even on error
+          new Directory(new File(path.toString)).deleteRecursively()
+        }
     )
 
   def mkRhoISpace[F[_]: Concurrent: Parallel: ContextShift: KeyValueStoreManager: Metrics: Span: Log](
@@ -65,8 +74,13 @@ object Resources {
           _,
           Par(),
           false,
-          Seq.empty,
-          NoOpExternalServices
+          // Always include AI and Ollama processes in tests to avoid config dependency
+          RhoRuntime.stdRhoAIProcesses[F] ++ RhoRuntime.stdRhoOllamaProcesses[F],
+          TestExternalServices(
+            OpenAIServiceMock.echoService,
+            GrpcClientService.noOpInstance,
+            OllamaServiceMock.echoService
+          )
         )
       )
 
@@ -102,7 +116,9 @@ object Resources {
                      space,
                      replay,
                      initRegistry,
-                     additionalSystemProcesses,
+                     // Always include AI and Ollama processes in tests
+                     additionalSystemProcesses ++ RhoRuntime.stdRhoAIProcesses[F] ++ RhoRuntime
+                       .stdRhoOllamaProcesses[F],
                      Par(),
                      externalServices
                    )

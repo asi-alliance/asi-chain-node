@@ -13,7 +13,7 @@ import coop.rchain.casper.engine.BlockRetriever
 import coop.rchain.casper.protocol.BlockMessage
 import coop.rchain.casper.state.instances.ProposerState
 import coop.rchain.casper.util.comm._
-import coop.rchain.casper.{engine, _}
+import coop.rchain.casper._
 import coop.rchain.catscontrib.TaskContrib._
 import coop.rchain.catscontrib.ski._
 import coop.rchain.comm._
@@ -36,6 +36,7 @@ import coop.rchain.shared._
 import coop.rchain.shared.syntax._
 import coop.rchain.store.KeyValueStoreManager
 import coop.rchain.store.LmdbDirStoreManager.gb
+import fs2.{Stream => Fs2Stream}
 import fs2.concurrent.Queue
 import kamon._
 import monix.execution.Scheduler
@@ -162,6 +163,7 @@ class NodeRuntime[F[_]: Monixable: ConcurrentEffect: Parallel: Timer: ContextShi
         apiServers,
         casperLoop,
         updateForkChoiceLoop,
+        mergeableChannelsGCLoop,
         engineInit,
         casperLaunch,
         reportingHTTPRoutes,
@@ -173,7 +175,8 @@ class NodeRuntime[F[_]: Monixable: ConcurrentEffect: Parallel: Timer: ContextShi
         blockProcessor,
         blockProcessorState,
         blockProcessorQueue,
-        triggerProposeF
+        triggerProposeF,
+        heartbeatStream
       ) = result
 
       // 4. launch casper
@@ -196,6 +199,7 @@ class NodeRuntime[F[_]: Monixable: ConcurrentEffect: Parallel: Timer: ContextShi
           apiServers,
           casperLoop,
           updateForkChoiceLoop,
+          mergeableChannelsGCLoop,
           engineInit,
           reportingHTTPRoutes,
           webApi,
@@ -206,7 +210,8 @@ class NodeRuntime[F[_]: Monixable: ConcurrentEffect: Parallel: Timer: ContextShi
           proposerStateRefOpt,
           blockProcessor,
           blockProcessorState,
-          blockProcessorQueue
+          blockProcessorQueue,
+          heartbeatStream
         )
       }
       _ <- handleUnrecoverableErrors(program)
@@ -227,6 +232,7 @@ class NodeRuntime[F[_]: Monixable: ConcurrentEffect: Parallel: Timer: ContextShi
       apiServers: APIServers,
       casperLoop: CasperLoop[F],
       updateForkChoiceLoop: CasperLoop[F],
+      mergeableChannelsGCLoop: CasperLoop[F],
       engineInit: EngineInit[F],
       reportingRoutes: ReportingHttpRoutes[F],
       webApi: WebApi[F],
@@ -237,7 +243,8 @@ class NodeRuntime[F[_]: Monixable: ConcurrentEffect: Parallel: Timer: ContextShi
       proposerStateRefOpt: Option[Ref[F, ProposerState[F]]],
       blockProcessor: BlockProcessor[F],
       blockProcessingState: Ref[F, Set[BlockHash]],
-      incomingBlocksQueue: Queue[F, (Casper[F], BlockMessage)]
+      incomingBlocksQueue: Queue[F, (Casper[F], BlockMessage)],
+      heartbeatStream: Fs2Stream[F, Unit]
   )(
       implicit
       time: Time[F],
@@ -365,7 +372,8 @@ class NodeRuntime[F[_]: Monixable: ConcurrentEffect: Parallel: Timer: ContextShi
           .create[F](proposeRequestsQueue, proposer.get, proposerStateRefOpt.get)
       else fs2.Stream.empty
 
-      updateForkChoiceLoopStream = fs2.Stream.eval(updateForkChoiceLoop).repeat
+      updateForkChoiceLoopStream    = fs2.Stream.eval(updateForkChoiceLoop).repeat
+      mergeableChannelsGCLoopStream = fs2.Stream.eval(mergeableChannelsGCLoop).repeat
 
       serverStream = fs2
         .Stream(
@@ -375,9 +383,11 @@ class NodeRuntime[F[_]: Monixable: ConcurrentEffect: Parallel: Timer: ContextShi
           servers.adminHttpServer,
           blockProcessorStream,
           proposerStream,
+          heartbeatStream,
           engineInitStream,
           casperLoopStream,
-          updateForkChoiceLoopStream
+          updateForkChoiceLoopStream,
+          mergeableChannelsGCLoopStream
         )
         .parJoinUnbounded
 

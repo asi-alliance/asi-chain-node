@@ -42,8 +42,8 @@ object VaultParser {
               .liftTo[F]
 
           // Balance parser
-          def asiBalance(revBalanceStr: String) = tryWithMsg(revBalanceStr.toLong)(
-            failMsg = s"INVALID WALLET BALANCE `$revBalanceStr`. Please put positive number."
+          def asiBalance(asiBalanceStr: String) = tryWithMsg(asiBalanceStr.toLong)(
+            failMsg = s"INVALID WALLET BALANCE `$asiBalanceStr`. Please put positive number."
           )
 
           // Parse ASI address and balance
