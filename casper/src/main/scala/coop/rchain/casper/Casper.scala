@@ -130,7 +130,8 @@ final case class CasperShardConf(
     quarantineLength: Int,
     minPhloPrice: Long,
     enableMergeableChannelGC: Boolean,
-    mergeableChannelsGCDepthBuffer: Int
+    mergeableChannelsGCDepthBuffer: Int,
+    disableLateBlockFiltering: Boolean
 )
 
 sealed abstract class MultiParentCasperInstances {
@@ -140,15 +141,20 @@ sealed abstract class MultiParentCasperInstances {
   def hashSetCasper[F[_]: Sync: Metrics: Concurrent: CommUtil: Log: Time: Timer: SafetyOracle: BlockStore: BlockDagStorage: Span: EventPublisher: SynchronyConstraintChecker: LastFinalizedHeightConstraintChecker: Estimator: DeployStorage: CasperBufferStorage: BlockRetriever](
       validatorId: Option[ValidatorIdentity],
       casperShardConf: CasperShardConf,
-      approvedBlock: BlockMessage
+      approvedBlock: BlockMessage,
+      heartbeatSignalRef: cats.effect.concurrent.Ref[F, Option[HeartbeatSignal[F]]]
   )(implicit runtimeManager: RuntimeManager[F]): F[MultiParentCasper[F]] =
     for {
-      _ <- ().pure
+      // Create flag to track finalization status - block proposals fail fast if finalization is running
+      // This prevents validators from creating blocks with stale snapshots during finalization
+      finalizationInProgress <- cats.effect.concurrent.Ref[F].of(false)
     } yield {
       new MultiParentCasperImpl(
         validatorId,
         casperShardConf,
-        approvedBlock
+        approvedBlock,
+        finalizationInProgress,
+        heartbeatSignalRef
       )
     }
 }

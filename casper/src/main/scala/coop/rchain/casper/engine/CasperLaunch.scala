@@ -66,7 +66,8 @@ object CasperLaunch {
         conf.genesisBlockData.quarantineLength,
         conf.minPhloPrice,
         conf.enableMergeableChannelGC,
-        conf.mergeableChannelsGCDepthBuffer
+        conf.mergeableChannelsGCDepthBuffer,
+        conf.disableLateBlockFiltering
       )
       def launch(): F[Unit] =
         BlockStore[F].getApprovedBlock map {
@@ -142,11 +143,14 @@ object CasperLaunch {
         for {
           validatorId <- ValidatorIdentity.fromPrivateKeyWithLogging[F](conf.validatorPrivateKey)
           ab          = approvedBlock.candidate.block
+          // Create heartbeat signal ref for triggering fast proposals on deploy submission
+          heartbeatSignalRef <- Ref[F].of(Option.empty[HeartbeatSignal[F]])
           casper <- MultiParentCasper
                      .hashSetCasper[F](
                        validatorId,
                        casperShardConf,
-                       ab
+                       ab,
+                       heartbeatSignalRef
                      )
           init = for {
             _ <- askPeersForForkChoiceTips

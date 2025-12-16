@@ -124,7 +124,10 @@ class ConfigMapperSpec extends FunSuite with Matchers {
         "--influxdb",
         "--influxdb-udp",
         "--zipkin",
-        "--sigar"
+        "--sigar",
+        "--heartbeat-enabled",
+        "--heartbeat-check-interval 111111seconds",
+        "--heartbeat-max-lfb-age 222222seconds"
       ).mkString(" ")
 
     val options = Options(args.split(' '))
@@ -281,10 +284,11 @@ class ConfigMapperSpec extends FunSuite with Matchers {
         mergeableChannelsGCInterval = 5.minutes,
         mergeableChannelsGCDepthBuffer = 10,
         heartbeat = HeartbeatConf(
-          enabled = false,
-          checkInterval = 30.seconds,
-          maxLfbAge = 60.seconds
-        )
+          enabled = true,
+          checkInterval = 111111.seconds,
+          maxLfbAge = 222222.seconds
+        ),
+        disableLateBlockFiltering = false
       ),
       metrics = Metrics(
         prometheus = true,

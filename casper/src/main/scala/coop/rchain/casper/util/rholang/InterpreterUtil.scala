@@ -60,7 +60,8 @@ object InterpreterUtil {
       _                   <- Span[F].mark("before-unsafe-get-parents")
       parents             <- ProtoUtil.getParents(block)
       _                   <- Span[F].mark("before-compute-parents-post-state")
-      computedParentsInfo <- computeParentsPostState(parents, s, runtimeManager).attempt
+      disableLateFilter   = s.onChainState.shardConf.disableLateBlockFiltering
+      computedParentsInfo <- computeParentsPostState(parents, s, runtimeManager, disableLateFilter).attempt
       _                   <- Log[F].info(s"Computed parents post state for ${PrettyPrinter.buildString(block)}.")
       result <- computedParentsInfo match {
                  case Left(ex) =>
@@ -70,18 +71,79 @@ object InterpreterUtil {
                    if (incomingPreStateHash != computedPreStateHash) {
                      //TODO at this point we may just as well terminate the replay, there's no way it will succeed.
                      Log[F]
-                       .warn(
-                         s"Computed pre-state hash ${PrettyPrinter.buildString(computedPreStateHash)} does not equal block's pre-state hash ${PrettyPrinter
-                           .buildString(incomingPreStateHash)}"
+                       .error(
+                         s"CRITICAL: Computed pre-state hash ${PrettyPrinter.buildString(computedPreStateHash)} does not equal block's pre-state hash ${PrettyPrinter
+                           .buildString(incomingPreStateHash)}. Refusing to equivocate, dropping block #${block.body.state.blockNumber} (${PrettyPrinter
+                           .buildString(block.blockHash)})."
                        )
                        .as(none[StateHash].asRight[BlockError])
                    } else if (rejectedDeployIds != block.body.rejectedDeploys.map(_.sig).toSet) {
+                     // Detailed logging for InvalidRejectedDeploy mismatch
+                     val blockRejectedIds  = block.body.rejectedDeploys.map(_.sig).toSet
+                     val extraInComputed   = rejectedDeployIds.diff(blockRejectedIds)
+                     val missingInComputed = blockRejectedIds.diff(rejectedDeployIds)
+
+                     // Get all deploy signatures in the block for duplicate detection
+                     val allBlockDeploys = block.body.deploys.map(_.deploy.sig)
+                     val allDeploySigs   = allBlockDeploys ++ block.body.rejectedDeploys.map(_.sig)
+                     val duplicates =
+                       allDeploySigs.groupBy(identity).filter(_._2.size > 1).keys.toSet
+
+                     // Try to correlate rejected deploy sigs with actual deploy data
+                     val deployDataMap =
+                       block.body.deploys.map(pd => pd.deploy.sig -> pd.deploy).toMap
+
+                     def analyzeDeploySig(sig: ByteString): String = {
+                       val sigStr      = PrettyPrinter.buildString(sig)
+                       val isDuplicate = if (duplicates.contains(sig)) " [DUPLICATE]" else ""
+                       val deployInfo = deployDataMap.get(sig) match {
+                         case Some(deploy) =>
+                           s" (term=${deploy.data.term.take(50)}..., timestamp=${deploy.data.timestamp}, phloLimit=${deploy.data.phloLimit})"
+                         case None =>
+                           " (deploy data not found in block)"
+                       }
+                       s"$sigStr$isDuplicate$deployInfo"
+                     }
+
                      Log[F]
-                       .warn(
-                         s"Computed rejected deploys " +
-                           s"${rejectedDeployIds.map(PrettyPrinter.buildString).mkString(",")} does not equal " +
-                           s"block's rejected deploy " +
-                           s"${block.body.rejectedDeploys.map(_.sig).map(PrettyPrinter.buildString).mkString(",")}"
+                       .error(
+                         s"""
+                       |=== InvalidRejectedDeploy Analysis ===
+                       |Block #${block.body.state.blockNumber} (${PrettyPrinter.buildString(
+                              block.blockHash
+                            )})
+                       |Sender: ${PrettyPrinter.buildString(block.sender)}
+                       |Parents: ${parents
+                              .map(p => PrettyPrinter.buildString(p.blockHash))
+                              .mkString(", ")}
+                       |
+                       |Rejected deploy mismatch:
+                       |  Validator computed: ${rejectedDeployIds.size} rejected deploys
+                       |  Block contains:     ${blockRejectedIds.size} rejected deploys
+                       |
+                       |Extra in computed (validator wants to reject, but block creator didn't):
+                       |  Count: ${extraInComputed.size}
+                       |${if (extraInComputed.nonEmpty)
+                              extraInComputed.map(analyzeDeploySig).mkString("  ", "\n  ", "")
+                            else "  None"}
+                       |
+                       |Missing in computed (block creator rejected, but validator doesn't think should be):
+                       |  Count: ${missingInComputed.size}
+                       |${if (missingInComputed.nonEmpty)
+                              missingInComputed.map(analyzeDeploySig).mkString("  ", "\n  ", "")
+                            else "  None"}
+                       |
+                       |Duplicates found in block: ${duplicates.size}
+                       |${if (duplicates.nonEmpty)
+                              duplicates
+                                .map(PrettyPrinter.buildString)
+                                .mkString("  ", "\n  ", "")
+                            else "  None"}
+                       |
+                       |All deploys in block: ${allBlockDeploys.size}
+                       |All rejected in block: ${blockRejectedIds.size}
+                       |========================================
+                       |""".stripMargin
                        )
                        .as(InvalidRejectedDeploy.asLeft)
                    } else {
@@ -108,7 +170,37 @@ object InterpreterUtil {
     spanF.trace(ReplayBlockMetricsSource) {
       val internalDeploys       = ProtoUtil.deploys(block)
       val internalSystemDeploys = ProtoUtil.systemDeploys(block)
+
+      // Check for duplicate deploys in the block before replay
+      val allDeploySigs    = internalDeploys.map(_.deploy.sig) ++ block.body.rejectedDeploys.map(_.sig)
+      val deployDuplicates = allDeploySigs.groupBy(identity).filter(_._2.size > 1)
+      val hasDuplicates    = deployDuplicates.nonEmpty
+
       for {
+        _ <- if (hasDuplicates) {
+              Log[F].warn(
+                s"""
+                |=== Duplicate Deploys Detected in Block ===
+                |Block #${block.body.state.blockNumber} (${PrettyPrinter.buildString(
+                     block.blockHash
+                   )})
+                |Found ${deployDuplicates.size} duplicate deploy signatures:
+                |${deployDuplicates
+                     .map {
+                       case (sig, occurrences) =>
+                         s"  ${PrettyPrinter.buildString(sig)} (appears ${occurrences.size} times)"
+                     }
+                     .mkString("\n")}
+                |Total deploys: ${internalDeploys.size}
+                |Total rejected: ${block.body.rejectedDeploys.size}
+                |============================================
+                |""".stripMargin
+              )
+            } else {
+              Log[F].debug(
+                s"Block #${block.body.state.blockNumber}: replaying ${internalDeploys.size} deploys, ${block.body.rejectedDeploys.size} rejected"
+              )
+            }
         invalidBlocksSet <- dag.invalidBlocks
         unseenBlocksSet  <- ProtoUtil.unseenBlockHashes(dag, block)
         seenInvalidBlocksSet = invalidBlocksSet.filterNot(
@@ -240,7 +332,13 @@ object InterpreterUtil {
                             .ensure(new IllegalArgumentException("Parents must not be empty"))(
                               _.nonEmpty
                             )
-        computedParentsInfo             <- computeParentsPostState(nonEmptyParents, s, runtimeManager)
+        disableLateFilter = s.onChainState.shardConf.disableLateBlockFiltering
+        computedParentsInfo <- computeParentsPostState(
+                                nonEmptyParents,
+                                s,
+                                runtimeManager,
+                                disableLateFilter
+                              )
         (preStateHash, rejectedDeploys) = computedParentsInfo
         result <- runtimeManager.computeState(preStateHash)(
                    deploys,
@@ -258,10 +356,11 @@ object InterpreterUtil {
       )
     }
 
-  private def computeParentsPostState[F[_]: Concurrent: BlockStore: Log: Metrics](
+  def computeParentsPostState[F[_]: Concurrent: BlockStore: Log: Metrics](
       parents: Seq[BlockMessage],
       s: CasperSnapshot[F],
-      runtimeManager: RuntimeManager[F]
+      runtimeManager: RuntimeManager[F],
+      disableLateBlockFiltering: Boolean = false
   )(implicit spanF: Span[F]): F[(StateHash, Seq[ByteString])] =
     spanF.trace(ComputeParentPostStateMetricsSource) {
       parents match {
@@ -269,7 +368,7 @@ object InterpreterUtil {
         case Seq() =>
           (RuntimeManager.emptyStateHashFixed, Seq.empty[ByteString]).pure[F]
 
-        // For single parent, get itd post state hash
+        // For single parent, get its post state hash
         case Seq(parent) =>
           (ProtoUtil.postStateHash(parent), Seq.empty[ByteString]).pure[F]
 
@@ -289,6 +388,11 @@ object InterpreterUtil {
 
                 mergeableChs <- runtimeManager.loadMergeableChannels(postState, sender, seqNum)
 
+                // KEEP system deploys in the index, but they will be filtered out during conflict
+                // detection in DagMerger. System deploys (CloseBlockDeploy, SlashDeploy, etc.) are
+                // block-specific and have IDs that include the block hash. They should NOT participate
+                // in multi-parent merge conflict resolution (only user deploys can conflict), but they
+                // need to be in the index so mergeable channels count matches deploy count.
                 blockIndex <- BlockIndex(
                                b.blockHash,
                                b.body.deploys,
@@ -301,18 +405,61 @@ object InterpreterUtil {
               } yield blockIndex
             }
           }
+
+          // Compute scope: all ancestors of parents (blocks visible from these parents)
+          val parentHashes = parents.map(_.blockHash)
+
           for {
-            lfbState <- BlockStore[F]
-                         .getUnsafe(s.lastFinalizedBlock)
-                         .map(_.body.state.postStateHash)
-                         .map(Blake2b256Hash.fromByteString)
+            // Get all ancestors of all parents (including the parents themselves)
+            // Use bounded traversal that stops at finalized blocks to prevent O(chain_length) growth
+            ancestorSets <- parentHashes.toList.traverse(
+                             h => s.dag.withAncestors(h, bh => s.dag.isFinalized(bh).map(!_))
+                           )
+            // Each set includes the parent itself, so intersect to find common ancestors
+            ancestorSetsWithParents = parentHashes.toList.zip(ancestorSets).map {
+              case (parent, ancestors) => ancestors + parent
+            }
+            visibleBlocks = ancestorSetsWithParents.flatten.toSet
+
+            // Find the lowest common ancestor of all parents.
+            // This is the highest block that is an ancestor of ALL parents.
+            // This is deterministic because it depends only on DAG structure, not finalization state.
+            commonAncestors = ancestorSetsWithParents.reduce(_ intersect _)
+            commonAncestorsWithHeight <- commonAncestors.toList.traverse { h =>
+                                          s.dag.lookupUnsafe(h).map(m => (h, m.blockNum))
+                                        }
+            // The LCA is the common ancestor with the highest block number
+            // Fall back to genesis if no common ancestor found (shouldn't happen with valid parents)
+            lcaOpt = if (commonAncestorsWithHeight.nonEmpty)
+              Some(commonAncestorsWithHeight.maxBy(_._2)._1)
+            else
+              None
+            // Use LCA as the LFB for computing descendants, fall back to snapshot LFB
+            lfbForDescendants: BlockHash = lcaOpt.getOrElse(s.lastFinalizedBlock)
+
+            // Get the LFB block to use its post-state as the merge base
+            lfbBlock <- BlockStore[F].getUnsafe(lfbForDescendants)
+            lfbState = Blake2b256Hash.fromByteString(lfbBlock.body.state.postStateHash)
+
+            parentHashStr  = parentHashes.map(h => PrettyPrinter.buildString(h)).mkString(", ")
+            lcaStr         = PrettyPrinter.buildString(lfbForDescendants)
+            lcaStateStr    = PrettyPrinter.buildString(lfbBlock.body.state.postStateHash)
+            snapshotLfbStr = PrettyPrinter.buildString(s.lastFinalizedBlock)
+            _ <- Log[F].info(
+                  s"computeParentsPostState: parents=[$parentHashStr], " +
+                    s"commonAncestors=${commonAncestors.size}, LCA=$lcaStr (block ${lfbBlock.body.state.blockNumber}), " +
+                    s"LCA state=$lcaStateStr, visibleBlocks=${visibleBlocks.size}, snapshotLFB=$snapshotLfbStr"
+                )
+
             r <- DagMerger.merge[F](
                   s.dag,
-                  s.lastFinalizedBlock,
+                  lfbForDescendants,
                   lfbState,
                   blockIndexF(_).map(_.deployChains),
                   runtimeManager.getHistoryRepo,
-                  DagMerger.costOptimalRejectionAlg
+                  DagMerger.costOptimalRejectionAlg,
+                  Some(visibleBlocks),
+                  disableLateBlockFiltering
                 )
             (state, rejected) = r
           } yield (ByteString.copyFrom(state.bytes.toArray), rejected)

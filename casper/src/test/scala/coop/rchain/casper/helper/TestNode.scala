@@ -94,7 +94,9 @@ case class TestNode[F[_]: Timer](
     transportLayerEffect: TransportLayerTestImpl[F],
     connectionsCellEffect: Cell[F, Connections],
     rpConfAskEffect: RPConfAsk[F],
-    eventPublisherEffect: EventPublisher[F]
+    eventPublisherEffect: EventPublisher[F],
+    finalizationInProgressRef: Ref[F, Boolean],
+    heartbeatSignalRefEffect: Ref[F, Option[HeartbeatSignal[F]]]
 )(implicit concurrentF: Concurrent[F]) {
   // Scalatest `assert` macro needs some member of the Assertions trait.
   // An (inferior) alternative would be to inherit the trait...
@@ -156,13 +158,16 @@ case class TestNode[F[_]: Timer](
     quarantineLength = 20000,
     minPhloPrice = 1,
     enableMergeableChannelGC = false,
-    mergeableChannelsGCDepthBuffer = 10
+    mergeableChannelsGCDepthBuffer = 10,
+    disableLateBlockFiltering = false
   )
 
   implicit val casperEff = new MultiParentCasperImpl[F](
     validatorId,
     shardConf,
-    genesis
+    genesis,
+    finalizationInProgressRef,
+    heartbeatSignalRefEffect
   )
 
   implicit val rspaceMan = RSpaceStateManagerTestImpl()
@@ -584,8 +589,10 @@ object TestNode {
                          )
                      })
                  }
-                 blockProcessorQueue <- Queue.unbounded[F, (Casper[F], BlockMessage)]
-                 blockProcessorState <- Ref.of[F, Set[BlockHash]](Set.empty)
+                 blockProcessorQueue    <- Queue.unbounded[F, (Casper[F], BlockMessage)]
+                 blockProcessorState    <- Ref.of[F, Set[BlockHash]](Set.empty)
+                 finalizationInProgress <- Ref.of[F, Boolean](false)
+                 heartbeatSignalRef     <- Ref.of[F, Option[HeartbeatSignal[F]]](Option.empty)
 
                  node = new TestNode[F](
                    name,
@@ -624,7 +631,9 @@ object TestNode {
                    commUtilEffect = commUtil,
                    requestedBlocksEffect = requestedBlocks,
                    blockRetrieverEffect = blockRetriever,
-                   metricEffect = metricEff
+                   metricEffect = metricEff,
+                   finalizationInProgressRef = finalizationInProgress,
+                   heartbeatSignalRefEffect = heartbeatSignalRef
                  )
                } yield node
              })
