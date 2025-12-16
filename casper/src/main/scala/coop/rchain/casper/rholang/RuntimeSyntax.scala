@@ -477,7 +477,7 @@ final class RuntimeOps[F[_]: Sync: Span: Log: Metrics](
       val deploy = ConstructDeploy.sourceDeploy(
         term,
         timestamp = System.currentTimeMillis,
-        // Hardcoded phlogiston limit / 1 REV if phloPrice=1
+        // Hardcoded phlogiston limit / 1 ASI if phloPrice=1
         phloLimit = 100 * 1000 * 1000,
         sec = privKey
       )

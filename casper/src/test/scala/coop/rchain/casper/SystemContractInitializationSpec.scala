@@ -7,13 +7,13 @@ import coop.rchain.casper.util.GenesisBuilder.buildGenesis
 import coop.rchain.casper.InvalidBlock._
 import coop.rchain.blockstorage.syntax._
 import coop.rchain.p2p.EffectsTestInstances.LogicalTime
-import coop.rchain.rholang.interpreter.util.RevAddress
+import coop.rchain.rholang.interpreter.util.ASIAddress
 import coop.rchain.shared.Base16
 import monix.execution.Scheduler.Implicits.global
 import org.scalatest.{FlatSpec, Matchers}
 
 /**
-  * Diagnostic test to verify system contracts (PoS, RevVault) are properly
+  * Diagnostic test to verify system contracts (PoS, ASIVault) are properly
   * initialized at genesis and accessible in subsequent blocks.
   *
   * This test helps isolate whether ConsumeFailed errors in system deploys
@@ -49,14 +49,14 @@ class SystemContractInitializationSpec extends FlatSpec with Matchers {
     t.runSyncUnsafe()
   }
 
-  "RevVault" should "be accessible at genesis post-state" in {
-    val genesisVaultAddr = RevAddress.fromPublicKey(genesis.genesisVaults.toList.head._2).get
+  "ASIVault" should "be accessible at genesis post-state" in {
+    val genesisVaultAddr = ASIAddress.fromPublicKey(genesis.genesisVaults.toList.head._2).get
 
     val getVaultQuery = s"""
-      |new return, rl(`rho:registry:lookup`), RevVaultCh, vaultCh in {
-      |  rl!(`rho:rchain:revVault`, *RevVaultCh) |
-      |  for (@(_, RevVault) <- RevVaultCh) {
-      |    @RevVault!("findOrCreate", "${genesisVaultAddr.address.toBase58}", *vaultCh) |
+      |new return, rl(`rho:registry:lookup`), ASIVaultCh, vaultCh in {
+      |  rl!(`rho:rchain:asiVault`, *ASIVaultCh) |
+      |  for (@(_, ASIVault) <- ASIVaultCh) {
+      |    @ASIVault!("findOrCreate", "${genesisVaultAddr.address.toBase58}", *vaultCh) |
       |    for (@(true, vault) <- vaultCh) {
       |      @vault!("balance", *return)
       |    }
@@ -70,7 +70,7 @@ class SystemContractInitializationSpec extends FlatSpec with Matchers {
                    getVaultQuery,
                    genesis.genesisBlock.body.state.postStateHash
                  )
-        _ = println(s"RevVault balance result: $result")
+        _ = println(s"ASIVault balance result: $result")
         _ = result should not be empty
         // Genesis vault should have 9,000,000 REV
       } yield ()
@@ -82,13 +82,13 @@ class SystemContractInitializationSpec extends FlatSpec with Matchers {
     // GenesisBuilder sets validator vaults to 0 REV (line 94: Vault(_, 0))
     // This test verifies that and checks if it might cause slashing issues
     val validatorPk   = genesis.validatorKeyPairs.head._2
-    val validatorAddr = RevAddress.fromPublicKey(validatorPk).get
+    val validatorAddr = ASIAddress.fromPublicKey(validatorPk).get
 
     val getValidatorVaultQuery = s"""
-      |new return, rl(`rho:registry:lookup`), RevVaultCh, vaultCh in {
-      |  rl!(`rho:rchain:revVault`, *RevVaultCh) |
-      |  for (@(_, RevVault) <- RevVaultCh) {
-      |    @RevVault!("findOrCreate", "${validatorAddr.address.toBase58}", *vaultCh) |
+      |new return, rl(`rho:registry:lookup`), ASIVaultCh, vaultCh in {
+      |  rl!(`rho:rchain:asiVault`, *ASIVaultCh) |
+      |  for (@(_, ASIVault) <- ASIVaultCh) {
+      |    @ASIVault!("findOrCreate", "${validatorAddr.address.toBase58}", *vaultCh) |
       |    for (@(true, vault) <- vaultCh) {
       |      @vault!("balance", *return)
       |    }
@@ -168,23 +168,23 @@ class SystemContractInitializationSpec extends FlatSpec with Matchers {
     t.runSyncUnsafe()
   }
 
-  "PoS vault balance via RevVault" should "show if vault has funds" in {
-    // Get the PoS vault's REV address and check balance via RevVault
+  "PoS vault balance via ASIVault" should "show if vault has funds" in {
+    // Get the PoS vault's REV address and check balance via ASIVault
     val getPosVaultBalanceQuery =
       """
-      |new return, rl(`rho:registry:lookup`), posCh, RevVaultCh in {
+      |new return, rl(`rho:registry:lookup`), posCh, ASIVaultCh in {
       |  rl!(`rho:rchain:pos`, *posCh) |
-      |  rl!(`rho:rchain:revVault`, *RevVaultCh) |
-      |  for (@(_, PoS) <- posCh; @(_, RevVault) <- RevVaultCh) {
+      |  rl!(`rho:rchain:asiVault`, *ASIVaultCh) |
+      |  for (@(_, PoS) <- posCh; @(_, ASIVault) <- ASIVaultCh) {
       |    new posVaultInfoCh, vaultCh, balanceCh in {
       |      @PoS!("getInitialPosVault", *posVaultInfoCh) |
-      |      for (@(posRevAddr, _) <- posVaultInfoCh) {
-      |        // Use the REV address to get the vault via RevVault
-      |        @RevVault!("findOrCreate", posRevAddr, *vaultCh) |
+      |      for (@(posASIAddr, _) <- posVaultInfoCh) {
+      |        // Use the REV address to get the vault via ASIVault
+      |        @ASIVault!("findOrCreate", posASIAddr, *vaultCh) |
       |        for (@(true, vault) <- vaultCh) {
       |          @vault!("balance", *balanceCh) |
       |          for (@balance <- balanceCh) {
-      |            return!(("posVaultRevAddr", posRevAddr, "balance", balance))
+      |            return!(("posVaultASIAddr", posASIAddr, "balance", balance))
       |          }
       |        }
       |      }

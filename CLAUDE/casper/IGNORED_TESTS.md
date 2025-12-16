@@ -171,7 +171,7 @@ Tests that need review due to changes in DAG structure and finalization semantic
 - LastFinalizedAPITest: "return false for children, uncles and cousins of last finalized block"
 - BondedStatusAPITest: "return true for newly bonded validator"
 
-### REV Balance Merging (2 tests)
+### ASI Balance Merging (2 tests)
 Tests waiting for REV balance merging implementation:
 - InterpreterUtilTest: "merge histories in case of multiple parents"
 - MultiParentCasperCommunicationSpec: "ask peers for blocks it is missing and add them"
