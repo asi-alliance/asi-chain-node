@@ -22,6 +22,7 @@
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Support & Community](#support--community)
+- [Contributing](#contributing)
 - [Known Issues & Reporting](#caveats-and-filing-issues)
 - [Acknowledgements](#acknowledgements)
 - [License](#licence-information)
@@ -612,6 +613,11 @@ Join the F1r3fly community for real-time support, tutorials, and project updates
 2. **Troubleshooting**: Check the [troubleshooting section](#troubleshooting)
 3. **Community**: Ask questions in Discord
 4. **Issues**: Report bugs in GitHub Issues
+
+## Contributing
+
+Known issues and bugs are tracked in the [Issues](https://github.com/asi-alliance/asi-chain-node/issues) section.  
+If you encounter a problem that is not listed, please feel free to open a new issue and provide as much detail as possible.
 
 ## Caveats and Filing Issues
 
