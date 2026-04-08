@@ -9,6 +9,7 @@ pub mod errors;
 pub mod estimator;
 pub mod finality;
 pub mod genesis;
+pub mod health;
 pub mod heartbeat_signal;
 pub mod helper;
 pub mod last_finalized_height_constraint_checker;
