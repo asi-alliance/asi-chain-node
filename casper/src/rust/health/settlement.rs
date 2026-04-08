@@ -101,8 +101,6 @@ impl EpochEconomicSettlement {
         };
         settlement.settlement_hash = settlement_hash(&settlement);
 
-        self.state_store.put_epoch_settlement(&settlement)?;
-
         let spent = settlement
             .burned_amount
             .checked_add(settlement.validator_reward_amount)
@@ -118,6 +116,8 @@ impl EpochEconomicSettlement {
         if spent != funded {
             return Err(SettlementError::AccountingInvariantViolation { spent, funded });
         }
+
+        self.state_store.put_epoch_settlement(&settlement)?;
 
         let event = PolicyEvent::EpochSettled {
             epoch_id,

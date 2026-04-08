@@ -66,7 +66,7 @@ impl HealthControlLayer {
         current_epoch: u64,
         target_epoch: u64,
     ) -> Result<PolicyEvent, HealthControlError> {
-        let pending_snapshot = self.oracle.consume_pending_snapshot(target_epoch)?;
+        let pending_snapshot = self.oracle.query_pending_snapshot(target_epoch)?;
         let event = self.controller.activate_policy_for_epoch(
             current_epoch,
             target_epoch,
@@ -80,6 +80,9 @@ impl HealthControlLayer {
                 epoch_id: target_epoch,
             })?;
         self.state_store.put_policy_state(&policy)?;
+        if pending_snapshot.is_some() {
+            let _ = self.oracle.consume_pending_snapshot(target_epoch)?;
+        }
 
         self.event_log.push(event.clone());
         Ok(event)
@@ -300,5 +303,26 @@ mod tests {
             result,
             Err(HealthControlError::MissingPolicyForEpoch { epoch_id: 22 })
         ));
+    }
+
+    #[test]
+    fn failed_activation_keeps_pending_snapshot() {
+        let mut control = control_layer();
+        control
+            .submit_health_input(10, bundle(12, 900_000, 900_000))
+            .expect("submit should succeed");
+
+        let failed_activation = control.activate_policy_for_epoch(12, 12);
+        assert!(matches!(
+            failed_activation,
+            Err(HealthControlError::PolicyController(
+                crate::rust::health::policy_controller::PolicyControllerError::InvalidActivationEpoch { .. }
+            ))
+        ));
+
+        let pending = control
+            .query_pending_policy(12)
+            .expect("pending query should succeed");
+        assert!(pending.is_some());
     }
 }
