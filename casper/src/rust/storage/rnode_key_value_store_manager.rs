@@ -7,6 +7,11 @@ use rspace_plus_plus::rspace::shared::{
     lmdb_dir_store_manager::{Db, LmdbDirStoreManager, LmdbEnvConfig, GB, TB},
 };
 
+use crate::rust::health::storage::{
+    HEALTH_EPOCH_SETTLEMENT_STORE_NAME, HEALTH_INPUT_SNAPSHOT_STORE_NAME,
+    HEALTH_POLICY_PARAMETERS_STORE_NAME, HEALTH_POLICY_STATE_STORE_NAME,
+};
+
 pub fn new_key_value_store_manager(
     dir_path: PathBuf,
     legacy_rspace_paths: Option<bool>,
@@ -111,6 +116,23 @@ pub fn rnode_db_mapping(legacy_rspace_paths: Option<bool>) -> Vec<(Db, LmdbEnvCo
         // Runtime mergeable store (cache of mergeable channels for block-merge)
         (
             Db::new("mergeable-channel-cache".to_string(), None),
+            dag_storage_env_config(),
+        ),
+        // Health control layer stores
+        (
+            Db::new(HEALTH_INPUT_SNAPSHOT_STORE_NAME.to_string(), None),
+            dag_storage_env_config(),
+        ),
+        (
+            Db::new(HEALTH_POLICY_STATE_STORE_NAME.to_string(), None),
+            dag_storage_env_config(),
+        ),
+        (
+            Db::new(HEALTH_EPOCH_SETTLEMENT_STORE_NAME.to_string(), None),
+            dag_storage_env_config(),
+        ),
+        (
+            Db::new(HEALTH_POLICY_PARAMETERS_STORE_NAME.to_string(), None),
             dag_storage_env_config(),
         ),
         // Deploy storage
