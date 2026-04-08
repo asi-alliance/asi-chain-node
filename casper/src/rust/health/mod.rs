@@ -5,6 +5,7 @@ pub mod input_oracle;
 pub mod params;
 pub mod policy_controller;
 pub mod settlement;
+pub mod simulator;
 pub mod storage;
 pub mod types;
 
@@ -31,6 +32,12 @@ pub use policy_controller::{
 };
 pub use settlement::{
     EpochEconomicSettlement, SettlementConfigurationError, SettlementError, SettlementRoutingConfig,
+};
+pub use simulator::{
+    scenario_critical_stress, scenario_healthy_baseline, scenario_hibernation_recovery,
+    scenario_moderate_deterioration, ExpectedRegime, HealthShadowSimulator, ShadowEpochInput,
+    ShadowEpochOutput, ShadowRegimeComparison, ShadowRegimeMismatch, ShadowSimulationError,
+    ShadowSimulationReport,
 };
 pub use storage::{HealthStateStore, HealthStorageError};
 pub use types::{

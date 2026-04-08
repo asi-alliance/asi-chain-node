@@ -183,7 +183,6 @@ impl HealthStateStore {
             .map_err(HealthStorageError::from)
     }
 
-    #[cfg(test)]
     fn from_stores(
         input_snapshot_store: EpochBytesStore,
         policy_state_store: EpochBytesStore,
@@ -198,8 +197,7 @@ impl HealthStateStore {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn in_memory_for_tests() -> Self {
+    pub fn in_memory() -> Self {
         use rspace_plus_plus::rspace::shared::in_mem_key_value_store::InMemoryKeyValueStore;
 
         let epoch_store =
@@ -207,6 +205,11 @@ impl HealthStateStore {
         let string_store =
             || KeyValueTypedStoreImpl::new(std::sync::Arc::new(InMemoryKeyValueStore::new()));
         Self::from_stores(epoch_store(), epoch_store(), epoch_store(), string_store())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_memory_for_tests() -> Self {
+        Self::in_memory()
     }
 }
 
