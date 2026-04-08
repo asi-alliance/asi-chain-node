@@ -24,7 +24,9 @@ pub use policy_controller::{
     HealthRegimeThresholds, PolicyControllerConfigurationError, PolicyControllerError,
     RegimePolicyProfile,
 };
-pub use settlement::{EpochEconomicSettlement, SettlementError};
+pub use settlement::{
+    EpochEconomicSettlement, SettlementConfigurationError, SettlementError, SettlementRoutingConfig,
+};
 pub use storage::{HealthStateStore, HealthStorageError};
 pub use types::{
     EmissionMode, EpochSettlement, HealthInputSnapshot, HealthRegime, PolicyState, PPM_DENOMINATOR,
