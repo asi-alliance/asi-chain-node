@@ -13,7 +13,11 @@ pub use codec::{
     serialize_policy_parameters, serialize_policy_state, HealthCodecError,
 };
 pub use events::{HealthInputRejectionReason, PolicyEvent};
-pub use input_oracle::{HealthInputError, HealthInputOracle};
+pub use input_oracle::{
+    encode_metrics_payload_v1, HealthInputBundle, HealthInputConfigurationError, HealthInputError,
+    HealthInputOracle, HealthInputOracleConfig, HealthInputSignature, HealthMetricsPayloadV1,
+    MetricBounds,
+};
 pub use params::{PolicyParameterError, PolicyParameters};
 pub use policy_controller::{HealthPolicyController, PolicyControllerError};
 pub use settlement::{EpochEconomicSettlement, SettlementError};

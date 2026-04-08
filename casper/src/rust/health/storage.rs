@@ -96,6 +96,21 @@ impl HealthStateStore {
             .map_err(HealthStorageError::from)
     }
 
+    pub fn get_latest_pending_snapshot(
+        &self,
+    ) -> Result<Option<HealthInputSnapshot>, HealthStorageError> {
+        let snapshot_map = self.input_snapshot_store.to_map()?;
+        if let Some((_, encoded)) = snapshot_map.into_iter().max_by_key(|(epoch, _)| *epoch) {
+            return Ok(Some(deserialize_health_input_snapshot(&encoded)?));
+        }
+        Ok(None)
+    }
+
+    pub fn delete_pending_snapshot(&self, target_epoch: u64) -> Result<(), HealthStorageError> {
+        self.input_snapshot_store.delete(vec![target_epoch])?;
+        Ok(())
+    }
+
     pub fn put_policy_state(&self, policy_state: &PolicyState) -> Result<(), HealthStorageError> {
         let bytes = serialize_policy_state(policy_state)?;
         self.policy_state_store
@@ -182,6 +197,17 @@ impl HealthStateStore {
             policy_parameters_store,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn in_memory_for_tests() -> Self {
+        use rspace_plus_plus::rspace::shared::in_mem_key_value_store::InMemoryKeyValueStore;
+
+        let epoch_store =
+            || KeyValueTypedStoreImpl::new(std::sync::Arc::new(InMemoryKeyValueStore::new()));
+        let string_store =
+            || KeyValueTypedStoreImpl::new(std::sync::Arc::new(InMemoryKeyValueStore::new()));
+        Self::from_stores(epoch_store(), epoch_store(), epoch_store(), string_store())
+    }
 }
 
 #[derive(Debug, Error)]
@@ -199,27 +225,14 @@ pub enum HealthStorageError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use rspace_plus_plus::rspace::shared::in_mem_key_value_store::InMemoryKeyValueStore;
-    use shared::rust::store::key_value_typed_store_impl::KeyValueTypedStoreImpl;
-
     use super::HealthStateStore;
     use crate::rust::health::params::PolicyParameters;
     use crate::rust::health::types::{
         EmissionMode, EpochSettlement, HealthInputSnapshot, HealthRegime, PolicyState,
     };
 
-    fn epoch_store() -> KeyValueTypedStoreImpl<u64, Vec<u8>> {
-        KeyValueTypedStoreImpl::new(Arc::new(InMemoryKeyValueStore::new()))
-    }
-
-    fn string_store() -> KeyValueTypedStoreImpl<String, Vec<u8>> {
-        KeyValueTypedStoreImpl::new(Arc::new(InMemoryKeyValueStore::new()))
-    }
-
     fn state_store() -> HealthStateStore {
-        HealthStateStore::from_stores(epoch_store(), epoch_store(), epoch_store(), string_store())
+        HealthStateStore::in_memory_for_tests()
     }
 
     #[test]
