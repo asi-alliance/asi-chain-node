@@ -19,7 +19,11 @@ pub use input_oracle::{
     MetricBounds,
 };
 pub use params::{PolicyParameterError, PolicyParameters};
-pub use policy_controller::{HealthPolicyController, PolicyControllerError};
+pub use policy_controller::{
+    HealthPolicyController, HealthPolicyControllerConfig, HealthRegimeProfiles,
+    HealthRegimeThresholds, PolicyControllerConfigurationError, PolicyControllerError,
+    RegimePolicyProfile,
+};
 pub use settlement::{EpochEconomicSettlement, SettlementError};
 pub use storage::{HealthStateStore, HealthStorageError};
 pub use types::{
