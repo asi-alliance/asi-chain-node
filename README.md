@@ -1,3 +1,16 @@
+> [!WARNING]
+> **PROJECT STATUS**
+>
+> This repository is currently **frozen** and is no longer under active development
+>
+> Development of the **Scala implementation** has been discontinued. All future development efforts are focused on the **Rust implementation** of the node, which is available here: [F1R3FLY-io/f1r3node-rust](https://github.com/F1R3FLY-io/f1r3node-rust)
+> 
+> The most recent updates in this repository is considered **experimental** and has **not been fully validated for use**
+>
+> The **latest stable Docker image** is available in [**Amazon ECR**](https://gallery.ecr.aws/f6y9h6x4/asi-chain/node) and is recommended for deployments
+>
+> We sincerely appreciate everyone who has used, tested, and contributed to this project. Thank you for your support and understanding
+
 # F1r3fly
 
 > A decentralized, economic, censorship-resistant, public compute infrastructure and blockchain that hosts and executes smart contracts with trustworthy, scalable, concurrent proof-of-stake consensus.
